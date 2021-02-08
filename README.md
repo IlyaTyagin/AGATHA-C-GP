@@ -1,7 +1,9 @@
-Agatha Overview
-===============
+AGATHA-C/GP (2021) Overview
+=====================
 
 ![logo](https://github.com/JSybrandt/agatha/blob/master/logo.png?raw=true)
+
+# The new hypothesis generation system is here. Ready for COVID-19 research.
 
 [Checkout our Docs on ReadTheDocs](https://agatha-hypothesis-generation.readthedocs.io)
 
