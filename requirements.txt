@@ -28,12 +28,12 @@ pandas
 protobuf
 pygsheets
 python-Levenshtein
-pytorch-lightning
+pytorch-lightning==0.7.6
 scispacy
 sentencepiece
 spacy
 sqlitedict
-torch
+torch==1.5.0
 tqdm
 transformers
 
