@@ -39,6 +39,20 @@ def get_medline_documents(
           directory=medline_dir,
           show_progress=True,
       )
+    if config.ftp.include_daily_updates:
+        print("Downloading daily updates...")
+        with ftp_util.ftp_connect(
+            address=config.ftp.address,
+            workdir=config.ftp.workdir_daily,
+        ) as conn:
+          # Downloads new files if not already present in shared
+          xml_paths_daily = ftp_util.ftp_retreive_all(
+              conn=conn,
+              pattern="^.*\.xml\.gz$",
+              directory=medline_dir,
+              show_progress=True,
+          )
+          xml_paths += xml_paths_daily
   else:
     print(f"Skipping FTP download, using {medline_dir}/*.xml.gz instead")
     assert medline_dir.is_dir(), f"Cannot find {medline_dir}"

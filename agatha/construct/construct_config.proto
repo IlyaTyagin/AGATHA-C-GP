@@ -86,7 +86,8 @@ message ClusterConfig {
 
 
 // This is used to specify the remote location of pubmed articles.  Defaults to
-// the most recent baseline.
+// the most recent baseline. 
+// ADDON for C/GP: added daily medline updates 
 message FtpSource {
 
   // url of the ftp server
@@ -94,6 +95,10 @@ message FtpSource {
 
   // The remote location to download from
   optional string workdir = 2 [default="pubmed/baseline"];
+  
+  // Medline daily updates
+  optional bool include_daily_updates = 3 [default=false];
+  optional string workdir_daily = 4 [default="pubmed/updatefiles"];
 }
 
 
