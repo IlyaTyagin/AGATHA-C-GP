@@ -186,7 +186,7 @@ if __name__ == "__main__":
     records=ngram_sentences,
     get_neighbor_keys_fn=text_util.get_ngram_keys,
   )
-  ckpt("ngram_edges")
+  ckpt("ngram_edges", textfile=True)
 
   bow_sentences = ngram_sentences.map_partitions(
       text_util.add_bow_to_analyzed_sentence
@@ -200,7 +200,7 @@ if __name__ == "__main__":
       for name in checkpoint.get_checkpoints_like("*hashed_names")
     ])
     .map(
-      lambda r: {"key": r["hash"], "value": r["name"]}
+      lambda r: {"key": r["hash"], "value": [r["name"]]}
     )
   )
   sqlite3_lookup.create_lookup_table(
