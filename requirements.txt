@@ -33,7 +33,7 @@ scispacy
 sentencepiece
 spacy
 sqlitedict
-torch==1.5.0
+torch==1.7.1
 tqdm
 transformers==2.11.0
 
