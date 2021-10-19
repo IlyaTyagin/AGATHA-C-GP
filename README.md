@@ -7,16 +7,13 @@ AGATHA-C/GP (2021) Overview
 
 Checkout our Docs on [ReadTheDocs](https://agatha-hypothesis-generation.readthedocs.io)
 
-Checkout our latest AGATHA paper: ["Accelerating COVID-19 research with graph mining and transformer-based learning"](https://www.biorxiv.org/content/10.1101/2021.02.11.430789v1)
+Checkout our latest AGATHA paper: ["Accelerating COVID-19 research with graph mining and transformer-based learning"](https://arxiv.org/abs/2102.07631)
 
 The most recent AGATHA-C/GP Deep Learning models can be found [here](https://drive.google.com/drive/folders/1geaejpkqCJ302RBhh6Z-GbbL_FsZo_Y6)
 
-We are currently doing a bunch of development around the [CORD-19][cord_19]
-datsset. These customizations have been funded by an NSF RAPID grant.
+_Looking for visualization?_
 
-If you're here looking for the _CBAG: Conditional Biomedical
-Abstract Generation_ project, take a look in the
-[agatha/ml/abstract_generator][cbag_link] submodule.
+It's our another actively developed project, the link is [here](https://github.com/IlyaTyagin/AgathaSemanticVisualizer) (no installation required, web-based interface).
 
 ## Install Agatha to use pretrained models
 
