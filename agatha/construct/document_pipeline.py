@@ -6,8 +6,10 @@ from agatha.construct import (
     embedding_util,
     ftp_util,
     graph_util,
-    semrep_util,
+    #semrep_util,
     text_util,
+    semrep_handler,
+    file_util,
 )
 from agatha.construct.document_parsers import (
   parse_pubmed_xml,
@@ -17,6 +19,8 @@ from agatha.util import misc_util
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+from pathlib import Path
 
 def get_medline_documents(
     config:cpb.ConstructConfig,
@@ -137,15 +141,50 @@ def perform_document_independent_tasks(
   """
 
   ckpt("documents", ckpt_prefix)
+    
+
+  # Run SemRep processing (EXPERIMENTAL)
+  #n_elems_documents = documents.count().compute()
+  #print(f'SemRep stage. Number of elements in documents: {n_elems_documents}')
+
+  #documents_fpath = \
+   # list(Path(config.scratch_dir).joinpath(f"checkpoints/{ckpt_prefix}_documents/").glob('*.pkl'))
+  
+  #dbag_documents_fnames = dbag.from_sequence(
+   #   documents_fpath, 
+      #npartitions=25
+  #)
+  
+  semrep_sentences_folder = Path(config.scratch_dir).joinpath(f'checkpoints/{ckpt_prefix}_sentences/')
+  if semrep_sentences_folder.joinpath('__done__').is_file():
+    #print("skipping SR stage, using file_util.load...")
+    sentences = file_util.load(semrep_sentences_folder)
+  else:
+    print("performing SR stage")
+    sentences = documents.map_partitions(
+      semrep_handler.sr_process_checkpoints,
+      nlm_soft_folder=config.nlm.nlm_soft_install_dir,
+      sr_temp_folder=config.nlm.sr_scratch_dir,
+      sr_replace_utf8_path=config.nlm.sr_replace_utf8_path,
+      sr_params = config.nlm.sr_run_params,
+      sr_binary = config.nlm.sr_binary_path,
+    )
+    ckpt("sentences", ckpt_prefix)
+  #ckpt("sr_results", ckpt_prefix)
+
+  sr_predicate_edges = sentences.map_partitions(
+      text_util.generate_sr_predicate_edges,
+  )
+  ckpt("sr_predicate_edges", ckpt_prefix, textfile=True)
 
   # Split documents into sentences, filter out too-long and too-short sentences.
-  sentences = documents.map_partitions(
-      text_util.split_sentences,
-      # --
-      min_sentence_len=config.parser.min_sentence_len,
-      max_sentence_len=config.parser.max_sentence_len,
-  )
-  ckpt("sentences", ckpt_prefix)
+  
+  #sentences = documents.map_partitions(
+  #  text_util.split_sentences,
+  #  # --
+  #  min_sentence_len=config.parser.min_sentence_len,
+  #  max_sentence_len=config.parser.max_sentence_len,
+  #)
 
   # Get metadata terms from each sentence
   coded_term_edges = graph_util.record_to_bipartite_edges(
@@ -166,26 +205,48 @@ def perform_document_independent_tasks(
   ckpt("adj_sent_edges", ckpt_prefix, textfile=True)
 
   # Apply lemmatization and entity extraction to sentences
-  parsed_sentences = sentences.map_partitions(
+  parsed_sentences_folder = Path(config.scratch_dir).joinpath(f'checkpoints/{ckpt_prefix}_parsed_sentences/')
+  if parsed_sentences_folder.joinpath('__done__').is_file():
+    #print("skipping parsing stage, using file_util.load...")
+    parsed_sentences = file_util.load(parsed_sentences_folder)
+  else:
+    parsed_sentences = sentences.map_partitions(
       text_util.analyze_sentences,
       # --
       text_field="sent_text",
+    )
+    ckpt("parsed_sentences", ckpt_prefix)
+    
+    
+  l_e_m_labels_sentences = parsed_sentences.map_partitions(
+    text_util.reduce_sentence_tokens_redundancy,
   )
-  ckpt("parsed_sentences", ckpt_prefix)
+  ckpt("l_e_m_labels_sentences", ckpt_prefix)
+    
+  # Get l_e_m_labels_edges edges
+  l_e_m_labels_edges = graph_util.record_to_bipartite_edges(
+    records=l_e_m_labels_sentences,
+    get_neighbor_keys_fn=text_util.get_l_e_m_labels_keys,
+  )
+  ckpt("l_e_m_labels_edges", ckpt_prefix, textfile=True)
+
 
   # Get lemma edges
-  lemma_edges = graph_util.record_to_bipartite_edges(
-    records=parsed_sentences,
-    get_neighbor_keys_fn=text_util.get_interesting_token_keys,
-  )
-  ckpt("lemma_edges", ckpt_prefix, textfile=True)
+  #lemma_edges = graph_util.record_to_bipartite_edges(
+  #  records=parsed_sentences,
+  #  get_neighbor_keys_fn=text_util.get_interesting_token_keys,
+  #)
+  #ckpt("lemma_edges", ckpt_prefix, textfile=True)
 
   # Get entity edges
-  entity_edges = graph_util.record_to_bipartite_edges(
-    records=parsed_sentences,
-    get_neighbor_keys_fn=text_util.get_entity_keys,
-  )
-  ckpt("entity_edges", ckpt_prefix, textfile=True)
+  #entity_edges = graph_util.record_to_bipartite_edges(
+  #  records=parsed_sentences,
+  #  get_neighbor_keys_fn=text_util.get_entity_keys,
+  #)
+  #ckpt("entity_edges", ckpt_prefix, textfile=True)
+    
+
+
 
   # If we're running semrep
   if (
