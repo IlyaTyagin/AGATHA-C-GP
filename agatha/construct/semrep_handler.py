@@ -170,13 +170,13 @@ class SemRepHandler():
         self.sr_log_path = self.temp_folder.joinpath("sr_log.txt")
         self.skr_file_path = self.nlm_soft_path.joinpath("public_mm/bin/skrmedpostctl")
         self.wsd_file_path = self.nlm_soft_path.joinpath("public_mm/bin/wsdserverctl")
-        self.sr_binary_path = self.nlm_soft_path.joinpath("public_semrep/bin/semrep.v1.9")
+        self.sr_binary_path = self.nlm_soft_path.joinpath("public_semrep/bin/semrep.v1.9.BINARY.Linux")
         
             ### Additional parameters ###
         self.use_nltk_tokenizer = False
         self.restart_mm_services = restart_mm_services
         if not params:
-            self.params = '--sldiID -A -S -F -n --negex_st_add all'
+            self.params = '--sldiID -DS -L 2021 -Z 2021AB -A -F -n --negex_st_add all -V NLM --relaxed_model'
         else:
             self.params = params
         
