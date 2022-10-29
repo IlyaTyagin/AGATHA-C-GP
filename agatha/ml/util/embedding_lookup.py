@@ -93,6 +93,11 @@ class EmbeddingLookupTable():
       return self._type_part2matrix[path_key][row]
     else:  # user has elected not to use cache
       return self._get_file_handle(*path_key)["embeddings"][row]
+  
+  def _get_row_nocache(self, type_:str, part:int, row:int)->np.array:
+    # Doesn't use any caching (we already got everything)
+    path_key = (type_, part)
+    return self._get_file_handle(*path_key)["embeddings"][row]
 
   def __getitem__(self, entity:str)->np.array:
     assert entity in self.entities, f"Cannot find {entity} in index"

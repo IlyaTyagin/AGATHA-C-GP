@@ -12,6 +12,7 @@ from agatha.ml.hypothesis_predictor import predicate_util
 from pathlib import Path
 import os
 from agatha.ml.util import hparam_util
+import random
 
 
 class HypothesisPredictor(AgathaModule):
@@ -76,6 +77,18 @@ class HypothesisPredictor(AgathaModule):
     self.validation_predicates = None
     self.predicates = None
     self.coded_terms = None
+    
+    ## numpy cache directory, add argparse interface later
+    
+    self.np_cache_dir = Path(
+      '/lustre/acslab/users/2288/Agatha_models/2021_11_22/dataloader_experiments/cached_links_np/'
+    )
+    if self.np_cache_dir:
+      self.use_np_cache = True
+      self.train_cache_sample_size = 10
+      self.val_cache_sample_size = 2
+    else:
+      self.use_np_cache = False
 
   def configure_paths(
       self,
@@ -209,41 +222,55 @@ class HypothesisPredictor(AgathaModule):
 
   def prepare_for_training(self)->None:
     self._assert_configured()
-    entities = self.embeddings.keys()
-    assert len(entities) > 0, "Failed to find embedding entities."
-    self.coded_terms = list(filter(is_umls_term_type, entities))
-    self.predicates = list(filter(
-      predicate_util.is_valid_predicate_name,
-      entities
-    ))
-    self.training_predicates, self.validation_predicates = \
-        self.training_validation_split(self.predicates)
-    self.training_examples = predicate_util.PredicateExampleDataset(
-        predicate_ds=self.training_predicates,
-        all_predicates=self.predicates,
-        embeddings=self.embeddings,
-        graph=self.graph,
-        coded_terms=self.coded_terms,
-        neighbor_sample_rate=self.hparams.neighbor_sample_rate,
-        negative_swap_rate=self.hparams.negative_swap_rate,
-        negative_scramble_rate=self.hparams.negative_scramble_rate,
-        preload_on_first_call=not self.hparams.disable_cache,
-    )
-    self.validation_examples = predicate_util.PredicateExampleDataset(
-        predicate_ds=self.validation_predicates,
-        all_predicates=self.predicates,
-        embeddings=self.embeddings,
-        graph=self.graph,
-        coded_terms=self.coded_terms,
-        neighbor_sample_rate=self.hparams.neighbor_sample_rate,
-        negative_swap_rate=self.hparams.negative_swap_rate,
-        negative_scramble_rate=self.hparams.negative_scramble_rate,
-        preload_on_first_call=not self.hparams.disable_cache,
-    )
-    self._vprint("Ready for training!")
+    
+    if not self.use_np_cache:
+    
+      entities = self.embeddings.keys()
+      assert len(entities) > 0, "Failed to find embedding entities."
+      self.coded_terms = list(filter(is_umls_term_type, entities))
+      self.predicates = list(filter(
+        predicate_util.is_valid_predicate_name,
+        entities
+      ))
+      self.training_predicates, self.validation_predicates = \
+          self.training_validation_split(self.predicates)
+      self.training_examples = predicate_util.PredicateExampleDataset(
+          predicate_ds=self.training_predicates,
+          all_predicates=self.predicates,
+          embeddings=self.embeddings,
+          graph=self.graph,
+          coded_terms=self.coded_terms,
+          neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+          negative_swap_rate=self.hparams.negative_swap_rate,
+          negative_scramble_rate=self.hparams.negative_scramble_rate,
+          preload_on_first_call=not self.hparams.disable_cache,
+      )
+      self.validation_examples = predicate_util.PredicateExampleDataset(
+          predicate_ds=self.validation_predicates,
+          all_predicates=self.predicates,
+          embeddings=self.embeddings,
+          graph=self.graph,
+          coded_terms=self.coded_terms,
+          neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+          negative_swap_rate=self.hparams.negative_swap_rate,
+          negative_scramble_rate=self.hparams.negative_scramble_rate,
+          preload_on_first_call=not self.hparams.disable_cache,
+      )
+      self._vprint("Ready for training! (No cacheed links are used)")
 
   def train_dataloader(self)->torch.utils.data.DataLoader:
     self._vprint("Getting Training Dataloader")
+    
+    if self.use_np_cache:
+      tdl_obj = predicate_util.Numpy_cache_links_obj(embeddings=self.embeddings)
+      fnames_flist = list(self.np_cache_dir.joinpath('train').glob('*/'))
+      fnames_sample = random.sample(
+        fnames_flist, 
+        self.train_cache_sample_size
+      )
+      tdl_obj.load(fnames_sample)
+      self.training_examples = tdl_obj
+    
     return self._configure_dataloader(
         self.training_examples,
         shuffle=True,
@@ -253,6 +280,17 @@ class HypothesisPredictor(AgathaModule):
 
   def val_dataloader(self)->torch.utils.data.DataLoader:
     self._vprint("Getting Validation Dataloader")
+    
+    if self.use_np_cache:
+      tdl_obj = predicate_util.Numpy_cache_links_obj(embeddings=self.embeddings)
+      fnames_flist = list(self.np_cache_dir.joinpath('val').glob('*/'))
+      fnames_sample = random.sample(
+        fnames_flist, 
+        self.val_cache_sample_size
+      )
+      tdl_obj.load(fnames_sample)
+      self.validation_examples = tdl_obj
+    
     return self._configure_dataloader(
         self.validation_examples,
         shuffle=False,
