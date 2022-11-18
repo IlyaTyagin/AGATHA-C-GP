@@ -23,7 +23,11 @@ def remove_paths_from_namespace(hparams:Namespace):
   """
 
   hparams = deepcopy(hparams)
-  attributes = list(hparams.__dict__.keys())
+  if type(hparams) != dict:
+    attributes = list(hparams.__dict__.keys())
+  else:
+    attributes = list(hparams.keys())
+  
   for attr in attributes:
     if (
         isinstance(getattr(hparams, attr), Path)

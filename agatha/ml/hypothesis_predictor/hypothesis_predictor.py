@@ -397,7 +397,7 @@ class HypothesisPredictor(AgathaModule):
     return (
         loss,
         dict( # pbar metrics
-        )
+      )
     )
 
   def training_step(
@@ -410,10 +410,13 @@ class HypothesisPredictor(AgathaModule):
     collate_predicate_training_examples
     """
     loss, metrics = self._step(**inputs)
+    
+    pb_metrics = {'train_loss': "{:.9f}".format(loss)}
+    
     return dict(
         loss=loss,
-        progress_bar=metrics,
-        log=metrics
+        progress_bar=pb_metrics,
+        log=dict(train_loss=loss)
     )
 
   def validation_step(
