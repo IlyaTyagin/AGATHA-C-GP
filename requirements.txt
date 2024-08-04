@@ -33,7 +33,7 @@ scispacy
 sentencepiece
 spacy
 sqlitedict
-torch==1.12.0+cu116
+torch
 tqdm
 file_read_backwards
 
