@@ -23,8 +23,8 @@ h5py
 lxml
 networkx
 nltk
-numpy
-pandas
+numpy==1.26.0
+pandas==2.1.3
 protobuf
 pygsheets
 python-Levenshtein
@@ -33,9 +33,8 @@ scispacy
 sentencepiece
 spacy
 sqlitedict
-torch==1.5.0
+torch==1.12.0+cu116
 tqdm
-transformers==2.4.1
 file_read_backwards
 
 ################################################################################

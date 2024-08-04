@@ -14,12 +14,69 @@ import os
 from agatha.ml.util import hparam_util
 import random
 
+from agatha.util.matrix_lookup import np_emb_lookup_table, np_graph, np_emb_lookup_chunked_table
+import json
+import scipy
+from tqdm import tqdm
+
 
 class HypothesisPredictor(AgathaModule):
   def __init__(self, hparams:Namespace):
     super(HypothesisPredictor, self).__init__(hparams)
 
     # If the hparams have been setup with paths, typical for training
+    
+    #print(hparams)
+    #print(100*'-')
+    
+    try:
+        self.default_root_dir = hparams.default_root_dir
+    except:
+        pass
+    
+    if (hasattr(hparams, "load_emb_to_ram")):
+        if hparams.load_emb_to_ram:
+            self.load_emb_to_ram = True
+        else:
+            self.load_emb_to_ram = False
+    else:
+        self.load_emb_to_ram = False
+    
+    if (hasattr(hparams, "virt_adj_list")):
+        if hparams.virt_adj_list:
+            self.virt_adj_list = hparams.virt_adj_list
+        else:
+            self.virt_adj_list = None
+    else:
+        self.virt_adj_list = None
+    
+    if (hasattr(hparams, "neg_subsample_list")):
+        if hparams.neg_subsample_list:
+            self.neg_subsample_list = hparams.neg_subsample_list
+        else:
+            self.neg_subsample_list = None
+    else:
+        self.neg_subsample_list = None
+    
+    if (hasattr(hparams, "top_k_sim_dict_fpath")): 
+        if hparams.top_k_sim_dict_fpath:
+            self.top_k_sim_dict_fpath = hparams.top_k_sim_dict_fpath
+        else:
+            self.top_k_sim_dict_fpath = None
+    else:
+        self.top_k_sim_dict_fpath = None
+        
+    if not (hasattr(hparams, "subj_neighbor_sample_rate")):
+        hparams.subj_neighbor_sample_rate = hparams.neighbor_sample_rate
+    
+    if (hasattr(hparams, "umls_to_st_dict_path")):
+        #print('YES ST DICT')
+        self.umls_to_st_dict_path_int = hparams.umls_to_st_dict_path
+    else:
+        #print('CANT FIND ST DICT')
+        self.umls_to_st_dict_path_int = None
+    
+    
     self.graph = None
     self.embeddings = None
     if (
@@ -75,18 +132,35 @@ class HypothesisPredictor(AgathaModule):
     self.training_predicates = None
     self.validation_examples = None
     self.validation_predicates = None
+    
     self.predicates = None
     self.coded_terms = None
+    self.pairs_set = set()
+    
+    if (hasattr(hparams, "pos_samples_list")):
+      if hparams.pos_samples_list:
+        print(f'\t\tUsing training predicates from: {hparams.pos_samples_list}')
+        with open(hparams.pos_samples_list, 'r') as f:
+          self.predicates = json.load(f)
+        
+          self.pairs_set = {
+              predicate_util.parse_predicate_name(predicate) for predicate in tqdm(
+                  self.predicates, desc='Parsing positive pairs...'
+              )
+          }
+        
     
     ## numpy cache directory, add argparse interface later
     
     self.np_cache_dir = Path(
-      '/lustre/acslab/users/2288/Agatha_models/2021_11_22/dataloader_experiments/cached_links_np/'
+      '/work/acslab/users/tyagin/Agatha_data/moe_training/prefetch/aapp_aapp/cache_np'
     )
+    self.np_cache_dir = None
+    
     if self.np_cache_dir:
       self.use_np_cache = True
-      self.train_cache_sample_size = 10
-      self.val_cache_sample_size = 2
+      self.train_cache_sample_size = 40
+      self.val_cache_sample_size = 1
     else:
       self.use_np_cache = False
 
@@ -97,20 +171,73 @@ class HypothesisPredictor(AgathaModule):
       embedding_dir:Path,
       disable_cache:bool=False
   ):
+    
+    path_separator = '|'
+    entity_db_sqlite = None
+    entity_db_split = str(entity_db).split(path_separator)
+    entity_db_json = Path(entity_db_split[0])
+    if len(entity_db_split) > 1:
+        entity_db_sqlite = Path(entity_db_split[1])
+    
     graph_db = Path(graph_db)
-    entity_db = Path(entity_db)
+    #entity_db = Path(entity_db)
     embedding_dir = Path(embedding_dir)
-    assert graph_db.is_file(), f"Failed to find {graph_db}"
-    assert entity_db.is_file(), f"Failed to find {entity_db}"
-    assert embedding_dir.is_dir(), f"Failed to find {embedding_dir}"
-    self.embeddings = EmbeddingLookupTable(
-        embedding_dir=embedding_dir,
-        entity_db=entity_db,
-        disable_cache=disable_cache,
-    )
-    self.graph=Sqlite3Graph(
-        graph_db,
-        disable_cache=disable_cache,
+    
+    
+    with open(entity_db_json, 'r') as f:
+        nodelbl_to_int_id_dict = json.load(f)
+        
+    if self.virt_adj_list:
+        print(f'Using virtual adjacency list from: {self.virt_adj_list}')
+        virt_nodes_adj_list_dict = json.load(
+            open(self.virt_adj_list)
+        )
+    else:
+        virt_nodes_adj_list_dict = None
+    
+    if entity_db_sqlite:
+        print(f'\t\tUsing PTBG embeddings from: {entity_db_sqlite}')
+        self.embeddings = EmbeddingLookupTable(
+            embedding_dir=embedding_dir,
+            entity_db=entity_db_sqlite,
+            disable_cache=True,
+        )
+    else:
+        use_mmap_flag = not self.load_emb_to_ram
+        print(f'\t\tUsing numpy stuff from: {entity_db_json.name}, use memmap: {use_mmap_flag}')
+        self.embeddings = np_emb_lookup_table(
+            nodelbl_to_int_id_dict=nodelbl_to_int_id_dict,
+            emb_path=embedding_dir,
+            memmap=use_mmap_flag,
+            virt_nodes_adj_list=virt_nodes_adj_list_dict
+        )
+        
+        # self.embeddings = np_emb_lookup_chunked_table(
+        #     #nodelbl_to_int_id_dict=nodelbl_to_int_id_dict,
+        #     #emb_path=embedding_dir,
+        #     emb_w_ids_fpath='/lustre/scratch/acslab/agatha_2021_11_22_data/2021_11_22_w_semnet/2021_11_22_w_semnet_pred_emb',
+        #     memmap=use_mmap_flag,
+        #     #virt_nodes_adj_list=virt_nodes_adj_list_dict
+        # )
+
+    
+    #self.graph=Sqlite3Graph(
+    #    graph_db,
+    #    disable_cache=disable_cache,
+    #)
+    
+    #scp_adj_path = Path(
+    #    '/lustre/acslab/shared/Agatha_shared/030122/ensemble/'
+    #    'adj_matrices/scipy_csr/aapp_gngm_csr.npz'
+    #)
+    scp_adj_path = graph_db
+    scp_adj_matr = scipy.sparse.load_npz(scp_adj_path)
+    
+    self.graph=np_graph(
+        nodelbl_to_int_id_dict=nodelbl_to_int_id_dict,
+        csr_adj_matr=scp_adj_matr,
+        #filter_node_types='mp',
+        virt_nodes_adj_list=virt_nodes_adj_list_dict
     )
 
   def paths_set(self)->bool:
@@ -124,6 +251,8 @@ class HypothesisPredictor(AgathaModule):
       self,
       terms:List[Tuple[str, str]],
       batch_size:int=1,
+      show_progress=False,
+      subj_neighbor_sample_rate=None,
   )->List[float]:
     """Evaluates the Agatha model for the given set of predicates.
 
@@ -164,6 +293,50 @@ class HypothesisPredictor(AgathaModule):
 
     """
     self._assert_configured()
+    
+    if not subj_neighbor_sample_rate:
+        subj_neighbor_sample_rate = self.hparams.neighbor_sample_rate
+    # This will formulate our input as PredicateEmbeddings examples.
+    observation_generator = predicate_util.PredicateObservationGenerator(
+        graph=self.graph,
+        embeddings=self.embeddings,
+        neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+        subj_neighbor_sample_rate=subj_neighbor_sample_rate,
+    )
+    #print(terms)
+    # Clean all of the input terms
+    predicates = [
+        predicate_util.to_predicate_name(
+          predicate_util.clean_coded_term(s),
+          predicate_util.clean_coded_term(o),
+        )
+        for s, o in terms
+    ]
+
+    result = []
+    for predicate_batch in tqdm(
+      iter_to_batches(predicates, batch_size),
+      disable=not show_progress,
+      desc='Batches progress',
+      total=int(len(predicates)/batch_size) + 1,
+    ):
+      # Get a tensor representing each stacked sample
+      batch = predicate_util.collate_predicate_embeddings(
+          [observation_generator[p] for p in predicate_batch]
+      )
+      # Move batch to device
+      batch = batch.to(self.get_device())
+      result += self.forward(batch).detach().cpu().numpy().tolist()
+    return result
+
+  def predict_from_terms_latest_layer(
+      self,
+      terms:List[Tuple[str, str]],
+      batch_size:int=1,
+      show_progress=False,
+  )->List[float]:
+
+    self._assert_configured()
     # This will formulate our input as PredicateEmbeddings examples.
     observation_generator = predicate_util.PredicateObservationGenerator(
         graph=self.graph,
@@ -180,15 +353,73 @@ class HypothesisPredictor(AgathaModule):
     ]
 
     result = []
-    for predicate_batch in iter_to_batches(predicates, batch_size):
+    result_last_layer = []
+    for predicate_batch in tqdm(
+      iter_to_batches(predicates, batch_size),
+      disable=not show_progress,
+      desc='Batches progress',
+      total=int(len(predicates)/batch_size) + 1,
+    ):
       # Get a tensor representing each stacked sample
       batch = predicate_util.collate_predicate_embeddings(
           [observation_generator[p] for p in predicate_batch]
       )
       # Move batch to device
       batch = batch.to(self.get_device())
+      #result += self.forward(batch).detach().cpu().numpy().tolist()
+      
+      predicate_embeddings = batch
+      # Size <seq_len> X <batch_size> X <dim>
+      local_stacked_emb = self.embedding_transformation(predicate_embeddings)
+      local_stacked_emb = torch.relu(local_stacked_emb)
+      encoded_predicate = self.encode_predicate_data(local_stacked_emb)
+      encoded_predicate = encoded_predicate.mean(dim=0)
+      
+      # saving predicate 
+      result_last_layer += encoded_predicate.detach().cpu().numpy().tolist()
+      
+      # continuing to get the score 
+      logit = self.encoding_to_logit(encoded_predicate)
+      logit = torch.sigmoid(logit)
+      result += logit.detach().cpu().numpy().tolist()
+      
+    return list(zip(result_last_layer, result))
+
+  def predict_from_terms_ext(
+      self,
+      terms:List[Tuple[str, str]],
+      batch_size:int=1,
+  )->List[float]:
+
+    self._assert_configured()
+    # This will formulate our input as PredicateEmbeddings examples.
+    observation_generator = predicate_util.PredicateObservationGenerator(
+        graph=self.graph,
+        embeddings=self.embeddings,
+        neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+    )
+    # Clean all of the input terms
+    predicates = [
+        predicate_util.to_predicate_name(
+          predicate_util.clean_coded_term(s),
+          predicate_util.clean_coded_term(o),
+        )
+        for s, o in terms
+    ]
+
+    result = []
+    batch_list = []
+    for predicate_batch in iter_to_batches(predicates, batch_size):
+      # Get a tensor representing each stacked sample
+      batch = predicate_util.collate_predicate_embeddings(
+          [observation_generator[p] for p in predicate_batch]
+      )
+      # Move batch to device
+      batch_list.append(batch.to('cpu'))
+      batch = batch.to(self.get_device())
       result += self.forward(batch).detach().cpu().numpy().tolist()
-    return result
+    
+    return torch.stack(batch_list), result
 
   def preload(self, include_embeddings:bool=False)->None:
     """Loads all supplemental information into memory.
@@ -228,10 +459,24 @@ class HypothesisPredictor(AgathaModule):
       entities = self.embeddings.keys()
       assert len(entities) > 0, "Failed to find embedding entities."
       self.coded_terms = list(filter(is_umls_term_type, entities))
-      self.predicates = list(filter(
-        predicate_util.is_valid_predicate_name,
-        entities
-      ))
+      
+      if not self.predicates:
+        self.predicates = list(filter(
+          predicate_util.is_valid_predicate_name,
+          entities
+        ))
+      if self.neg_subsample_list:
+          print(f'Using specifically curated set of negatives from: {self.neg_subsample_list}')
+          self.neg_subsample_list = json.load(open(self.neg_subsample_list))
+      else:
+          self.neg_subsample_list = None
+    
+      if self.top_k_sim_dict_fpath:
+          print(f'Using similarity-based negatives from: {self.top_k_sim_dict_fpath}')
+          self.top_k_sim_dict = json.load(open(self.top_k_sim_dict_fpath))
+      else:
+          self.top_k_sim_dict = None
+        
       self.training_predicates, self.validation_predicates = \
           self.training_validation_split(self.predicates)
       self.training_examples = predicate_util.PredicateExampleDataset(
@@ -240,30 +485,48 @@ class HypothesisPredictor(AgathaModule):
           embeddings=self.embeddings,
           graph=self.graph,
           coded_terms=self.coded_terms,
+          neg_subsamples=self.neg_subsample_list,
+          pos_pairs=self.pairs_set,
+          top_k_sim_dict=self.top_k_sim_dict,
           neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+          subj_neighbor_sample_rate=self.hparams.subj_neighbor_sample_rate,
           negative_swap_rate=self.hparams.negative_swap_rate,
           negative_scramble_rate=self.hparams.negative_scramble_rate,
+          negative_sts_rate=self.hparams.negative_sts_rate,
+          negative_subset_rate=self.hparams.negative_subset_rate,
+          negative_topk_rate=self.hparams.negative_topk_sim_rate,
           preload_on_first_call=not self.hparams.disable_cache,
+          umls_to_st_dict_path=self.umls_to_st_dict_path_int,
       )
+
       self.validation_examples = predicate_util.PredicateExampleDataset(
           predicate_ds=self.validation_predicates,
           all_predicates=self.predicates,
           embeddings=self.embeddings,
           graph=self.graph,
           coded_terms=self.coded_terms,
+          neg_subsamples=self.neg_subsample_list,
+          pos_pairs=self.pairs_set,
+          top_k_sim_dict=self.top_k_sim_dict,
           neighbor_sample_rate=self.hparams.neighbor_sample_rate,
+          subj_neighbor_sample_rate=self.hparams.subj_neighbor_sample_rate,
           negative_swap_rate=self.hparams.negative_swap_rate,
           negative_scramble_rate=self.hparams.negative_scramble_rate,
+          negative_sts_rate=self.hparams.negative_sts_rate,
+          negative_subset_rate=self.hparams.negative_subset_rate,
+          negative_topk_rate=self.hparams.negative_topk_sim_rate,
           preload_on_first_call=not self.hparams.disable_cache,
+          umls_to_st_dict_path=self.umls_to_st_dict_path_int,
       )
-      self._vprint("Ready for training! (No cacheed links are used)")
+      self._vprint("Ready for training! (No cached links are used)")
 
   def train_dataloader(self)->torch.utils.data.DataLoader:
     self._vprint("Getting Training Dataloader")
     
     if self.use_np_cache:
-      tdl_obj = predicate_util.Numpy_cache_links_obj(embeddings=self.embeddings)
-      fnames_flist = list(self.np_cache_dir.joinpath('train').glob('*/'))
+      tdl_obj = predicate_util.Numpy_cache_links_obj_ens(embeddings=self.embeddings.emb_matrix)
+      fnames_flist = list(self.np_cache_dir.joinpath('train_v2').glob('*/'))
+      #print(fnames_flist)
       fnames_sample = random.sample(
         fnames_flist, 
         self.train_cache_sample_size
@@ -282,8 +545,8 @@ class HypothesisPredictor(AgathaModule):
     self._vprint("Getting Validation Dataloader")
     
     if self.use_np_cache:
-      tdl_obj = predicate_util.Numpy_cache_links_obj(embeddings=self.embeddings)
-      fnames_flist = list(self.np_cache_dir.joinpath('val').glob('*/'))
+      tdl_obj = predicate_util.Numpy_cache_links_obj_ens(embeddings=self.embeddings.emb_matrix)
+      fnames_flist = list(self.np_cache_dir.joinpath('train_v2').glob('*/'))
       fnames_sample = random.sample(
         fnames_flist, 
         self.val_cache_sample_size
@@ -299,6 +562,7 @@ class HypothesisPredictor(AgathaModule):
     )
 
   def forward(self, predicate_embeddings:torch.FloatTensor)->torch.FloatTensor:
+    #print('Calling model.forward()')
     # Size <seq_len> X <batch_size> X <dim>
     local_stacked_emb = self.embedding_transformation(predicate_embeddings)
     local_stacked_emb = torch.relu(local_stacked_emb)
@@ -459,6 +723,24 @@ class HypothesisPredictor(AgathaModule):
         pg['lr'] = lr_scale * self.hparams.lr
     optimizer.step()
     optimizer.zero_grad()
+    
+    return None
+    
+#   def training_epoch_end(self, outputs) -> None:
+#     print('Saving model at the epoch end')
+#     # model_save_dir = Path(Path(self.default_root_dir)) / 'saved_model_ckpts'
+#     # model_save_dir.mkdir(exist_ok=True, parents=True)
+#     # model_save_fname = model_save_dir / f'epoch_{self.current_epoch}.cpkt'
+#     # #print(dir(self))
+#     # torch.save(
+#     #     self.state_dict(),
+#     #     model_save_fname
+#     # )
+    
+#     #self.validation_epoch_end(outputs)
+#     self._on_epoch_end(outputs)
+    
+#     return dict()
 
 
   @staticmethod
@@ -493,9 +775,14 @@ class HypothesisPredictor(AgathaModule):
     parser.add_argument("--embedding-dir", type=Path)
     parser.add_argument("--entity-db", type=Path)
     parser.add_argument("--graph-db", type=Path)
+    parser.add_argument("--nodeid-mappings", type=Path)
+    parser.add_argument("--pos-samples-list", type=Path)
     parser.add_argument("--margin", type=float)
     parser.add_argument("--negative-scramble-rate", type=int)
     parser.add_argument("--negative-swap-rate", type=int)
+    parser.add_argument("--negative-sts-rate", type=int)
+    parser.add_argument("--negative-subset-rate", type=int, default=0)
+    parser.add_argument("--negative-topk-sim-rate", type=int, default=0)
     parser.add_argument("--neighbor-sample-rate", type=int)
     parser.add_argument("--positives-per-batch", type=int)
     parser.add_argument("--transformer-dropout", type=float)
@@ -505,6 +792,12 @@ class HypothesisPredictor(AgathaModule):
     parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--weight-decay", type=float)
     parser.add_argument("--disable-cache", action="store_true")
+    parser.add_argument("--umls-to-st-dict-path", type=Path)
+    parser.add_argument("--load-emb-to-ram", action="store_true")
+    parser.add_argument("--subj-neighbor-sample-rate", type=int, default=15)
+    parser.add_argument("--virt-adj-list", type=Path, default=None)
+    parser.add_argument("--neg-subsample-list", type=Path, default=None)
+    parser.add_argument("--top-k-sim-dict-fpath", type=Path, default=None)
     parser.add_argument(
         "--simple",
         help="If set, ignore graph and use a simpler model architecture.",

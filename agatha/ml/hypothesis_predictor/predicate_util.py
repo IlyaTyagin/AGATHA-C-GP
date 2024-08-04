@@ -33,6 +33,11 @@ def clean_coded_term(term:str)->str:
   """
   if is_umls_term_type(term):
     return term.lower()
+  elif '_hadm' in term:
+        if term[:2] != 'h:':
+            return f"h:{term}".lower()
+        else:
+            return f"{term}".lower()
   else:
     return f"{UMLS_TERM_TYPE}:{term}".lower()
 
@@ -68,6 +73,17 @@ def parse_predicate_name(predicate_name:str)->Tuple[str, str]:
   assert typ == PREDICATE_TYPE
   return clean_coded_term(sub), clean_coded_term(obj)
 
+def neigh_sampling_func(neigh, sample_size):
+    return random.sample(neigh, sample_size)
+
+def _sample_neighborhood(self, neigh:Set[str])->List[str]:
+    neigh = list(neigh)
+    if len(neigh) < self.neighbor_sample_rate:
+      return neigh
+    else:
+      return neigh_sampling_func(neigh, self.neighbor_sample_rate)
+
+
 
 def to_predicate_name(
     subj:str,
@@ -101,10 +117,10 @@ def to_predicate_name(
     be set to "UNKNOWN"
 
   """
-  assert is_umls_term_type(subj), \
-    f"Called to_predicate_name with bad subject: {subj})"
-  assert is_umls_term_type(obj), \
-    f"Called to_predicate_name with bad object: {obj})"
+  # assert is_umls_term_type(subj), \
+  #   f"Called to_predicate_name with bad subject: {subj})"
+  # assert is_umls_term_type(obj), \
+  #   f"Called to_predicate_name with bad object: {obj})"
   assert ":" not in verb, "Verb cannot contain colon character"
   subj = subj[2:]
   obj = obj[2:]
@@ -121,18 +137,60 @@ class PredicateObservationGenerator():
       graph:Sqlite3LookupTable,
       embeddings:EmbeddingLookupTable,
       neighbor_sample_rate:int,
+      subj_neighbor_sample_rate:int,
   ):
     assert neighbor_sample_rate >= 0
     self.graph = graph
     self.embeddings = embeddings
     self.neighbor_sample_rate = neighbor_sample_rate
+    self.subj_neighbor_sample_rate = subj_neighbor_sample_rate
 
-  def _sample_neighborhood(self, neigh:Set[str])->List[str]:
+  def _sample_neighborhood(self, neigh:Set[str], rate)->List[str]:
     neigh = list(neigh)
-    if len(neigh) < self.neighbor_sample_rate:
+    if len(neigh) < rate:
       return neigh
     else:
-      return random.sample(neigh, self.neighbor_sample_rate)
+      return neigh_sampling_func(neigh, rate)
+
+  def _sample_neighborhood_new(
+      self, 
+      neigh:Set[str],
+      max_hop=3
+  )->List[str]:
+    
+    sample_size=self.neighbor_sample_rate
+    
+    if len(neigh) >= sample_size:
+        return random.sample(list(neigh), sample_size)
+    
+    else:
+        cur_k_hop = 1
+        cur_nodes = neigh
+        all_neig = neigh
+        n_to_go = sample_size
+
+        while (
+                (len(all_neig) < sample_size) 
+            and (cur_k_hop <= max_hop)
+        ):
+
+            all_new_neigs = self.graph.get_batch(cur_nodes)
+            
+            n_to_go = sample_size - len(all_neig)
+
+            if len(all_new_neigs) > n_to_go:
+                neighs_to_update = random.sample(all_new_neigs, n_to_go)
+            else:
+                neighs_to_update = all_new_neigs
+
+            all_neig.update(neighs_to_update)
+
+            cur_nodes = all_new_neigs
+            cur_k_hop += 1
+        
+        all_neig = list(all_neig)
+        #print(f'Got neighs: {all_neig[:5]}')
+        return all_neig
 
   def _get_pred_neigh_from_diff(
       self,
@@ -141,10 +199,15 @@ class PredicateObservationGenerator():
   )->Tuple[List[str], List[str]]:
     assert subj in self.graph, f"Failed to find {subj} in graph."
     assert obj in self.graph, f"Failed to find {obj} in graph."
-    s = set(filter(is_predicate_type, self.graph[subj]))
-    o = set(filter(is_predicate_type, self.graph[obj]))
+    #s = set(filter(is_predicate_type, self.graph[subj]))
+    #o = set(filter(is_predicate_type, self.graph[obj]))
+    
+    s = set(self.graph[subj])
+    o = set(self.graph[obj])
     s, o = (s-o, o-s)
-    return self._sample_neighborhood(s), self._sample_neighborhood(o)
+    #if len(s) == 0 or len(o) == 0:
+        #print(f'ZEROED SO: {subj}, {obj}')
+    return self._sample_neighborhood(s, rate=self.subj_neighbor_sample_rate), self._sample_neighborhood(o, rate=self.neighbor_sample_rate)
 
   def __getitem__(self, predicate:str)->PredicateEmbeddings:
     try:
@@ -158,7 +221,7 @@ class PredicateObservationGenerator():
     subj_neigh = [self.embeddings[s] for s in subj_neigh]
     obj_neigh = [self.embeddings[o] for o in obj_neigh]
     end = time.time()
-    #print("Generating PredicateEmbeddings:", int(end-start))
+    #print(f"Generating PredicateEmbeddings: {str(end-start)[:5]}")
     return PredicateEmbeddings(
         subj=subj,
         obj=obj,
@@ -213,6 +276,113 @@ class NegativePredicateGenerator():
     obj = self._choose_term()
     predicate = to_predicate_name(subj, obj)
     return predicate
+  
+class NegativePredicateGeneratorST():
+  def __init__(
+      self,
+      coded_terms:List[str],
+      graph:Sqlite3LookupTable,
+      st_dict:str,
+  ):
+    """Generates coded terms that appear in graph.
+    Respects subdomain recommendation protocol: 
+    - keeps subj from positive pred
+    - generates negative by sampling obj with the same ST as obj from positive pred
+    """
+    self.coded_terms = coded_terms
+    self.graph = graph
+    with open(st_dict, 'r') as f:
+      self.st_dict = json.load(f)
+      print(f'Using domain-specific negatives from: {st_dict}')
+
+  def _choose_term(self, subset):
+    term = random.choice(subset)
+    while term not in self.graph:
+      term = random.choice(subset)
+    return term
+
+  def generate(self, pred):
+    
+    pos_subj, pos_obj = parse_predicate_name(pred)
+    
+    pos_obj_st = self.st_dict.get(pos_obj)
+    if pos_obj_st:
+      obj_sampling_list = self.st_dict[pos_obj_st]
+    else:
+      #print(f'Warning: ST for {pos_obj} is not found, performing non-ST-based sampling')
+      obj_sampling_list = self.coded_terms
+    obj = self._choose_term(subset=obj_sampling_list)
+    
+    if pos_subj in self.graph:
+      subj = pos_subj
+    else:
+      print(f'Warning: {pos_subj} is not found in the graph, picking subj randomly')
+      subj = self._choose_term(subset=self.coded_terms)
+      
+    predicate = to_predicate_name(subj, obj)
+    return predicate
+
+class NegativePredicateGeneratorSubsample():
+  def __init__(
+      self,
+      graph:Sqlite3LookupTable,
+      neg_subsamples:list[str],
+      pos_pairs:Set[str],
+  ):
+    """Generates coded terms that appear in graph.
+    Uses only a specific vocabulary of terms for negative sampling.
+    """
+    self.graph = graph
+    self.neg_subsamples_list = neg_subsamples
+    self.pos_pairs_set = pos_pairs
+
+  def _choose_term(self, subset):
+    term = random.choice(subset)
+    while term not in self.graph:
+      term = random.choice(subset)
+    return term
+
+  def generate(self, pred):
+    pos_subj, pos_obj = parse_predicate_name(pred)
+    obj = self._choose_term(subset=self.neg_subsamples_list)
+    while (pos_subj, obj) in self.pos_pairs_set:
+        #print(f'Came across positive: {(pos_subj, obj)} during neg sampling. Repeating')
+        obj = self._choose_term(subset=self.neg_subsamples_list)
+    predicate = to_predicate_name(pos_subj, obj)
+    return predicate
+
+class NegativePredicateGeneratorTopKSim():
+  def __init__(
+      self,
+      graph:Sqlite3LookupTable,
+      top_k_sim_dict:dict,
+      pos_pairs:Set[str],
+  ):
+    """Generates coded terms that appear in graph.
+    Uses only a specific vocabulary of terms for negative sampling.
+    """
+    self.graph = graph
+    self.top_k_sim_dict = top_k_sim_dict
+    self.pos_pairs_set = pos_pairs
+
+  def _choose_term(self, subset):
+    term = random.choice(subset)
+    while term not in self.graph:
+      term = random.choice(subset)
+    return term
+
+  def generate(self, pred):
+    pos_subj, pos_obj = parse_predicate_name(pred)
+    cur_sampling_subset_list = self.top_k_sim_dict[pos_subj]
+    obj = self._choose_term(subset=cur_sampling_subset_list)
+    while (
+           (pos_subj, obj) in self.pos_pairs_set
+        or (obj, pos_subj) in self.pos_pairs_set
+    ):
+        #print(f'Came across positive: {(pos_subj, obj)} during neg sampling. Repeating')
+        obj = self._choose_term(subset=cur_sampling_subset_list)
+    predicate = to_predicate_name(pos_subj, obj)
+    return predicate
 
 
 class PredicateExampleDataset(torch.utils.data.Dataset):
@@ -223,11 +393,19 @@ class PredicateExampleDataset(torch.utils.data.Dataset):
       graph:Sqlite3LookupTable,
       embeddings:EmbeddingLookupTable,
       coded_terms:List[str],
+      neg_subsamples:List[str],
+      top_k_sim_dict:dict,
+      pos_pairs:Set[str],
       neighbor_sample_rate:int,
+      subj_neighbor_sample_rate:int,
       negative_swap_rate:int,
       negative_scramble_rate:int,
+      negative_sts_rate:int,
+      negative_subset_rate:int,
+      negative_topk_rate:int,
       preload_on_first_call:bool=True,
       verbose:bool=False,
+      umls_to_st_dict_path:Path=None,
   ):
     self.graph = graph
     self.embeddings = embeddings
@@ -237,19 +415,39 @@ class PredicateExampleDataset(torch.utils.data.Dataset):
         coded_terms=coded_terms,
         graph=graph,
     )
+    self.negative_generator_st = NegativePredicateGeneratorST(
+        coded_terms=coded_terms,
+        graph=graph,
+        st_dict=umls_to_st_dict_path,
+    )
+    self.negative_generator_subsample = NegativePredicateGeneratorSubsample(
+        graph=graph,
+        neg_subsamples=neg_subsamples,
+        pos_pairs=pos_pairs,
+    )
+    self.negative_generator_topk = NegativePredicateGeneratorTopKSim(
+        graph=graph,
+        top_k_sim_dict=top_k_sim_dict,
+        pos_pairs=pos_pairs,
+    )
     self.scramble_observation_generator = PredicateScrambleObservationGenerator(
         predicates=all_predicates,
         graph=graph,
         embeddings=embeddings,
         neighbor_sample_rate=neighbor_sample_rate,
+        subj_neighbor_sample_rate=subj_neighbor_sample_rate,
     )
     self.observation_generator = PredicateObservationGenerator(
         graph=graph,
         embeddings=embeddings,
         neighbor_sample_rate=neighbor_sample_rate,
+        subj_neighbor_sample_rate=subj_neighbor_sample_rate,
     )
     self.negative_swap_rate = negative_swap_rate
     self.negative_scramble_rate  = negative_scramble_rate
+    self.negative_sts_rate  = negative_sts_rate
+    self.negative_subset_rate = negative_subset_rate
+    self.negative_topk_rate = negative_topk_rate
     self._first_call = preload_on_first_call
 
   def __len__(self)->int:
@@ -269,14 +467,42 @@ class PredicateExampleDataset(torch.utils.data.Dataset):
     positive_observation = self.observation_generator[positive_predicate]
     negative_predicates = []
     negative_observations = []
+    
+    # SWAPS
+    
     for _ in range(self.negative_swap_rate):
       p = self.negative_generator.generate()
       negative_predicates.append(p)
       negative_observations.append(self.observation_generator[p])
-    for _ in range(self.negative_swap_rate):
+    
+    # SCRAMBLES
+    
+    for _ in range(self.negative_scramble_rate):
       p = self.negative_generator.generate()
       negative_predicates.append(p)
       negative_observations.append(self.scramble_observation_generator[p])
+    
+    # SUBDOMAIN RECOMMENDATION NEGATIVES
+    
+    for _ in range(self.negative_sts_rate):
+      p = self.negative_generator_st.generate(positive_predicate)
+      negative_predicates.append(p)
+      negative_observations.append(self.observation_generator[p])
+    
+    # SUBSET NEGATIVES
+    
+    for _ in range(self.negative_subset_rate):
+      p = self.negative_generator_subsample.generate(positive_predicate)
+      negative_predicates.append(p)
+      negative_observations.append(self.observation_generator[p])
+    
+    # TOP K SIMILAR NEGATIVES
+    
+    for _ in range(self.negative_topk_rate):
+      p = self.negative_generator_topk.generate(positive_predicate)
+      negative_predicates.append(p)
+      negative_observations.append(self.observation_generator[p])
+    
     end = time.time()
     #print(f"Worker produced batch: {int(end-start)}")
     return dict(
@@ -293,7 +519,9 @@ def collate_predicate_embeddings(
 ):
   return torch.cat([
     torch.nn.utils.rnn.pad_sequence([
-      torch.FloatTensor([p.subj, p.obj] + p.subj_neigh + p.obj_neigh)
+      torch.FloatTensor(
+          np.array([p.subj, p.obj] + p.subj_neigh + p.obj_neigh)
+      )
       for p in predicate_embeddings
     ])
   ])
@@ -322,7 +550,7 @@ def collate_predicate_training_examples(
       negative_observations_list=negative_observations_list,
   )
 
-class Numpy_cache_links_obj():
+class Numpy_cache_links_obj_ens():
     
     def __init__(self, embeddings):
         
@@ -411,33 +639,33 @@ class Numpy_cache_links_obj():
         current_dtype
     ):
         
-        self.pos_subj_np = np.zeros(shape=(n_samples, 3), dtype=current_dtype)
-        self.pos_obj_np = np.zeros(shape=(n_samples, 3), dtype=current_dtype)
-        self.pos_subj_neigh_np = np.zeros(shape=(n_samples, neigh_sample_rate, 3), dtype=current_dtype)
-        self.pos_obj_neigh_np = np.zeros(shape=(n_samples, neigh_sample_rate, 3), dtype=current_dtype)
+        self.pos_subj_np = np.zeros(shape=(n_samples, 1), dtype=current_dtype)
+        self.pos_obj_np = np.zeros(shape=(n_samples, 1), dtype=current_dtype)
+        self.pos_subj_neigh_np = np.zeros(shape=(n_samples, neigh_sample_rate, 1), dtype=current_dtype)
+        self.pos_obj_neigh_np = np.zeros(shape=(n_samples, neigh_sample_rate, 1), dtype=current_dtype)
 
-        self.neg_subj_np = np.zeros(shape=(n_samples, neg_per_batch, 3), dtype=current_dtype)
-        self.neg_obj_np = np.zeros(shape=(n_samples, neg_per_batch, 3), dtype=current_dtype)
-        self.neg_subj_neigh_np = np.zeros(shape=(n_samples, neg_per_batch, neigh_sample_rate, 3), dtype=current_dtype)
-        self.neg_obj_neigh_np = np.zeros(shape=(n_samples, neg_per_batch, neigh_sample_rate, 3), dtype=current_dtype)
+        self.neg_subj_np = np.zeros(shape=(n_samples, neg_per_batch, 1), dtype=current_dtype)
+        self.neg_obj_np = np.zeros(shape=(n_samples, neg_per_batch, 1), dtype=current_dtype)
+        self.neg_subj_neigh_np = np.zeros(shape=(n_samples, neg_per_batch, neigh_sample_rate, 1), dtype=current_dtype)
+        self.neg_obj_neigh_np = np.zeros(shape=(n_samples, neg_per_batch, neigh_sample_rate, 1), dtype=current_dtype)
         
         return None
     
     #----lowest lvl----#
     def prt_dict_to_np(self, prt_dict):
+      
+        #print(prt_dict)
     
-        return [
-            prt_dict['part'],
-            prt_dict['row'],
-            self.type_to_n_dict[prt_dict['type']]
-        ]
+        return prt_dict
 
     def np_to_prt_dict(self, np_arr):
+      
+        #print(np_arr)
 
         return {
-            'part': np_arr[0],
-            'row': np_arr[1],
-            'type': self.n_to_type_dict[np_arr[2]]
+            #'part': np_arr[0],
+            'row': np_arr,
+            #'type': self.n_to_type_dict[np_arr[2]]
         }
     #--------#
     
@@ -506,7 +734,7 @@ class Numpy_cache_links_obj():
     
     def np_to_sample(self, idx):
         return_dict = dict()
-        
+        #print(idx)
         return_dict['positive_predicate'] = (
             self.positive_predicate_list[idx]
         )
@@ -581,6 +809,16 @@ class Numpy_cache_links_obj():
 
           return vect
 
+    def convert_np_link_to_vect(self, obs_orig):
+
+      obs = copy.copy(obs_orig)
+
+      def get_emb(emb_loc_dict):
+
+          vect = self.emb_lookup_table[emb_loc_dict['row'][0]]
+
+          return vect
+
       obs.subj = get_emb(obs.subj)
       obs.obj = get_emb(obs.obj)
       obs.subj_neigh = [get_emb(l) for l in obs.subj_neigh]
@@ -597,7 +835,7 @@ class Numpy_cache_links_obj():
       train_ckpt_decoded['positive_predicate'] = cache_cpkt['positive_predicate']
 
       train_ckpt_decoded['positive_observation'] = (
-          self.convert_h5_link_to_vect(
+          self.convert_np_link_to_vect(
             cache_cpkt['positive_observation']
           )
       )
@@ -608,7 +846,7 @@ class Numpy_cache_links_obj():
 
       for no in train_ckpt_decoded['negative_observations']:
           nos_list.append(
-              self.convert_h5_link_to_vect(no)
+              self.convert_np_link_to_vect(no)
           )
 
       train_ckpt_decoded['negative_observations'] = nos_list
