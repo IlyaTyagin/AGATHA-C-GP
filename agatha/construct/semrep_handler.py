@@ -25,7 +25,7 @@ from typing import List, Any, Set, Optional, Tuple
 import multiprocessing
 #from agatha.construct.text_util import *
 
-from agatha.construct import construct_config_pb2 as cpb
+#from agatha.construct import construct_config_pb2 as cpb
 
 class SemRepHandler():
     """Simple python interface for painless running SemRep tool.
